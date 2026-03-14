@@ -1,0 +1,142 @@
+---
+- name: Deploy product-api on Ubuntu VM
+  hosts: vm
+  become: true
+
+  vars:
+    docker_image: "nixa001/product-api:latest"
+    container_name: "product-api"
+    app_port: 8086
+    mysql_root_password: "root"
+    db_name: "product_db"
+
+  tasks:
+
+    # -------------------------------------------------------
+    # ETAPE 1 : Preparation de la VM
+    # -------------------------------------------------------
+
+    - name: Update apt packages
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install required dependencies for Docker
+      apt:
+        name:
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+        state: present
+
+    - name: Create directory for Docker GPG key
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Add Docker GPG key
+      shell: |
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+      args:
+        creates: /etc/apt/keyrings/docker.gpg
+
+    - name: Add Docker repository
+      shell: |
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+      args:
+        creates: /etc/apt/sources.list.d/docker.list
+
+    - name: Update apt after adding Docker repo
+      apt:
+        update_cache: yes
+
+    - name: Install Docker
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+
+    - name: Start and enable Docker
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Install MySQL Server
+      apt:
+        name: mysql-server
+        state: present
+
+    - name: Start and enable MySQL
+      systemd:
+        name: mysql
+        state: started
+        enabled: yes
+
+    - name: Create product_db database
+      shell: |
+        mysql -u root -e "CREATE DATABASE IF NOT EXISTS {{ db_name }};"
+      ignore_errors: yes
+
+    # -------------------------------------------------------
+    # ETAPE 2 : Deploiement de l'application
+    # -------------------------------------------------------
+
+    - name: Pull image from Docker Hub
+      docker_image:
+        name: "{{ docker_image }}"
+        source: pull
+        force_source: yes
+
+    - name: Stop existing container (if running)
+      docker_container:
+        name: "{{ container_name }}"
+        state: stopped
+      ignore_errors: yes
+
+    - name: Remove existing container (if exists)
+      docker_container:
+        name: "{{ container_name }}"
+        state: absent
+      ignore_errors: yes
+
+    - name: Run product-api container
+      docker_container:
+        name: "{{ container_name }}"
+        image: "{{ docker_image }}"
+        state: started
+        restart_policy: always
+        ports:
+          - "{{ app_port }}:{{ app_port }}"
+        env:
+          DB_URL: "jdbc:mysql://172.17.0.1:3306/{{ db_name }}?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true"
+          DB_USER: "root"
+          DB_PASSWORD: "{{ mysql_root_password }}"
+
+    # -------------------------------------------------------
+    # ETAPE 3 : Verification
+    # -------------------------------------------------------
+
+    - name: Wait for application to start (port 8086)
+      wait_for:
+        host: localhost
+        port: "{{ app_port }}"
+        delay: 10
+        timeout: 60
+
+    - name: Verify GET /api/products returns 200
+      uri:
+        url: "http://localhost:{{ app_port }}/api/products"
+        method: GET
+        status_code: 200
+      register: health_check
+
+    - name: Show health check result
+      debug:
+        msg: "Application is UP — status: {{ health_check.status }}"
